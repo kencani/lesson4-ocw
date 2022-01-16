@@ -35,8 +35,18 @@
 ###  fetch_price_info 部分代码，通过对应api获取价格
 
 ```rust
+	fn fetch_price_info() -> Result<(), Error<T>> {
+			// TODO: 这是你们的功课
 
-fn fetch_price_info() -> Result<(), Error<T>> {
+			// 利用 offchain worker 取出 DOT 当前对 USD 的价格，并把写到一个 Vec 的存储里，
+			// 你们自己选一种方法提交回链上，并在代码注释为什么用这种方法提交回链上最好。只保留当前最近的 10 个价格，
+			// 其他价格可丢弃 （就是 Vec 的长度长到 10 后，这时再插入一个值时，要先丢弃最早的那个值）。
+
+			// 取得的价格 parse 完后，放在以下存儲：
+			// pub type Prices<T> = StorageValue<_, VecDeque<(u64, Permill)>, ValueQuery>
+
+			// 这个 http 请求可得到当前 DOT 价格：
+			// [https://api.coincap.io/v2/assets/polkadot](https://api.coincap.io/v2/assets/polkadot)。
 
 			let signer = Signer::<T, T::AuthorityId>::any_account();
 
@@ -50,29 +60,40 @@ fn fetch_price_info() -> Result<(), Error<T>> {
 				return Ok(());
 			}
 
-			let dot_price_info: DotPrice = Self::fetch_n_parse(DOT_PRICE_API)?;
-			let mut price_iter = dot_price_info.price_to_usd.split(|char| *char == '.' as u8);
 
-			let integer_part = Self::parse_float_part::<u64>(
-				price_iter.next().ok_or(<Error<T>>::InvalidPriceIntegerValueError)?,
-			)?;
-			let fractional_part = Self::parse_float_part::<u32>(
-				price_iter.next().ok_or(<Error<T>>::InvalidPriceValueFractionalError)?,
-			)?;
-			let fractional_part = Permill::from_parts(fractional_part);
+			let resp_bytes = Self::fetch_from_remote(DOT_PRICE_API).map_err(|e| {
+				log::error!("fetch price api error: {:?}", e);
+				<Error<T>>::HttpFetchingError
+			})?;
 
-			if let Some((_, res)) = signer.send_unsigned_transaction(
-				|acct| PricePayload {
-					price: (integer_part, fractional_part),
-					public: acct.public.clone(),
+			let resp_str = str::from_utf8(&resp_bytes).map_err(|_| <Error<T>>::HttpFetchingError)?;
+			log::info!("resp_str:{}", resp_str);
+
+
+			let root: Value = serde_json::from_str(&resp_str).map_err(|_| <Error<T>>::InvalidPriceValueError)?;
+			let price_option: &str  = root.get("data")
+				.and_then(|value| value.get("priceUsd"))
+				.and_then(|value| value.as_str()).ok_or(<Error<T>>::InvalidPriceValueError)?;
+			
+			match Self::get_decimal(price_option) {
+				Ok((integer_part, fractional_part)) => {
+					if let Some((_, res)) = signer.send_unsigned_transaction(
+						|acct| PricePayload {
+							price: (integer_part, fractional_part),
+							public: acct.public.clone(),
+						},
+						Call::submit_dot_price_unsigned_with_signed_payload,
+					) {
+						return res.map_err(|_| {
+							log::error!("Failed in submit_dot_price_unsigned_with_signed_payload");
+							<Error<T>>::OffchainUnsignedTxSignedPayloadError
+						});
+					}
+		
 				},
-				Call::submit_dot_price_unsigned_with_signed_payload,
-			) {
-				return res.map_err(|_| {
-					log::error!("Failed in submit_dot_price_unsigned_with_signed_payload");
-					<Error<T>>::OffchainUnsignedTxSignedPayloadError
-				});
-			}
+				Err(err) => { return Err(err); }
+			};
+
 
 			Err(<Error<T>>::NoLocalAcctForSigning)
 		}
